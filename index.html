@@ -356,16 +356,16 @@ const urls = {
 let scene, camera, renderer, controls;
 let raycaster = new THREE.Raycaster();
 let mouse = new THREE.Vector2();
-let currentFoot = "right";
+let currentFoot = "left"; // CHANGED: Default side set directly to left to align with tracer datasets
 let footGroup = new THREE.Group();
 let markerGroup = new THREE.Group();
 let regionGroup = new THREE.Group(); 
-let lineVisualizationGroup = new THREE.Group(); // Visual tracing tier container
+let lineVisualizationGroup = new THREE.Group(); 
 let isLoaded = false;
 let mode = "rotate"; 
 let markerLogs = [];
 let jsonDatabase = null;
-let currentLoadedMesh = null; // Reference link to the foot mesh scene sub-tree
+let currentLoadedMesh = null; 
 
 init();
 
@@ -390,6 +390,9 @@ async function init() {
 
     scene.add(footGroup);
     scene.add(markerGroup);
+    
+    // CRITICAL FIX: Add line group directly to the scene world roots instead of parenting inside the dynamically scaled mesh container
+    scene.add(lineVisualizationGroup); 
     regionGroup.visible = false; 
     scene.add(regionGroup);
 
@@ -458,9 +461,18 @@ function setupWebTestingControls() {
     });
 }
 
+function getDistanceToSegment(probePoint, nodeA, nodeB) {
+    const ab = new THREE.Vector3().subVectors(nodeB, nodeA);
+    const ap = new THREE.Vector3().subVectors(probePoint, nodeA);
+    let t = ap.dot(ab) / ab.lengthSq();
+    t = Math.max(0, Math.min(1, t)); 
+    const closestIntersection = new THREE.Vector3().copy(nodeA).addScaledVector(ab, t);
+    return probePoint.distanceTo(closestIntersection);
+}
+
 function drawAnatomicalOverlayLines() {
     lineVisualizationGroup.clear();
-    if (!jsonDatabase || !jsonDatabase.anatomical_database || !currentLoadedMesh) return;
+    if (!jsonDatabase || !jsonDatabase.anatomical_database) return;
 
     jsonDatabase.anatomical_database.forEach(item => {
         const points = [];
@@ -471,6 +483,7 @@ function drawAnatomicalOverlayLines() {
         else if (item.type.includes("muscle") || labelLower.includes("plantae")) trackColor = 0xffcc00;
 
         item.coordinates.forEach(coord => {
+            // CRITICAL FIX: The lines are now drawn in raw unscaled world space to review coordinates exactly as formatted
             points.push(new THREE.Vector3(...coord));
         });
 
@@ -478,7 +491,7 @@ function drawAnatomicalOverlayLines() {
         const lineMat = new THREE.LineBasicMaterial({ 
             color: trackColor, 
             linewidth: 4,
-            depthTest: false, // Disables bone clipping so lines pop over the mesh cleanly
+            depthTest: false, 
             transparent: true,
             opacity: 0.85
         });
@@ -486,9 +499,6 @@ function drawAnatomicalOverlayLines() {
         const visualTrackLine = new THREE.Line(lineGeom, lineMat);
         lineVisualizationGroup.add(visualTrackLine);
     });
-    
-    // Inject the visualizer straight into the shifted mesh tree to track transformations perfectly
-    currentLoadedMesh.add(lineVisualizationGroup);
 }
 
 function performLayeredRaycast() {
@@ -535,19 +545,18 @@ function performLayeredRaycast() {
             pathologies: ["Articular Surface Compression", "Friction Bruising"]
         });
 
-        // PROXIMITY SCALING PARAMETERS
-        const maxLateralTolerance = 0.015; // 1.5cm side-to-side alignment limit around the ray vector line
-        const maxDepthLimit = 0.025;       // 2.5cm absolute target depth limit inward from skin hit point
+        // FIXED PROXIMITY SCALING METRICS (Evaluated directly in absolute unscaled world units)
+        const maxLateralTolerance = 0.015; 
+        const maxDepthLimit = 0.025;       
 
-        if (jsonDatabase && jsonDatabase.anatomical_database && currentLoadedMesh) {
+        if (jsonDatabase && jsonDatabase.anatomical_database) {
             jsonDatabase.anatomical_database.forEach(item => {
                 let minDistanceToRayLine = Infinity;
                 let calculatedDepthFromSurface = 0;
 
                 for (let i = 0; i < item.coordinates.length - 1; i++) {
-                    // Convert local JSON nodes to absolute world coordinates to match ray trajectory tracking
-                    const nodeA = new THREE.Vector3(...item.coordinates[i]).applyMatrix4(currentLoadedMesh.matrixWorld);
-                    const nodeB = new THREE.Vector3(...item.coordinates[i+1]).applyMatrix4(currentLoadedMesh.matrixWorld);
+                    const nodeA = new THREE.Vector3(...item.coordinates[i]);
+                    const nodeB = new THREE.Vector3(...item.coordinates[i+1]);
                     
                     const subdivisions = 10;
                     for (let s = 0; s <= subdivisions; s++) {
@@ -642,26 +651,12 @@ function loadFoot() {
         currentLoadedMesh = gltf.scene; 
         currentLoadedMesh.traverse(c => { if(c.isMesh) { c.material = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.4, metalness: 0.2 }); } });
         
-        const box = new THREE.Box3().setFromObject(currentLoadedMesh); 
-        const size = new THREE.Vector3(); 
-        box.getSize(size); 
-        const center = new THREE.Vector3(); 
-        box.getCenter(center);
-        
-        const meshOffset = new THREE.Vector3(-center.x, -box.min.y, -center.z);
-        const maxDim = Math.max(size.x, size.y, size.z); 
-        const meshScale = 1.0 / maxDim;
-
-        currentLoadedMesh.position.copy(meshOffset);
-        currentLoadedMesh.scale.setScalar(meshScale);
-        currentLoadedMesh.position.multiplyScalar(meshScale);
-
+        // CRITICAL FIX: The 3D line engine now stays perfectly in 1:1 scale alignment with world bounds, matching the tracking coordinates without double matrices transformations
         footGroup.add(currentLoadedMesh); 
-        camera.position.set(0, 1.2, 2.5); 
-        controls.target.set(0, 0.4, 0); 
+        camera.position.set(0, 0.4, 1.2); 
+        controls.target.set(0, 0.1, 0); 
         isLoaded = true;
         
-        // Build lines now that the matrixWorld parent relationships are mapped safely
         drawAnatomicalOverlayLines();
     });
 }
