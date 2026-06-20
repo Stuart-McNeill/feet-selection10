@@ -356,7 +356,7 @@ const urls = {
 let scene, camera, renderer, controls;
 let raycaster = new THREE.Raycaster();
 let mouse = new THREE.Vector2();
-let currentFoot = "left"; // CHANGED: Default side set directly to left to align with tracer datasets
+let currentFoot = "left"; // Default to left side
 let footGroup = new THREE.Group();
 let markerGroup = new THREE.Group();
 let regionGroup = new THREE.Group(); 
@@ -391,7 +391,7 @@ async function init() {
     scene.add(footGroup);
     scene.add(markerGroup);
     
-    // CRITICAL FIX: Add line group directly to the scene world roots instead of parenting inside the dynamically scaled mesh container
+    // Decouple soft tissues from dynamic mesh containers
     scene.add(lineVisualizationGroup); 
     regionGroup.visible = false; 
     scene.add(regionGroup);
@@ -472,7 +472,7 @@ function getDistanceToSegment(probePoint, nodeA, nodeB) {
 
 function drawAnatomicalOverlayLines() {
     lineVisualizationGroup.clear();
-    if (!jsonDatabase || !jsonDatabase.anatomical_database) return;
+    if (!jsonDatabase || !jsonDatabase.anatomical_database || !currentLoadedMesh) return;
 
     jsonDatabase.anatomical_database.forEach(item => {
         const points = [];
@@ -483,8 +483,10 @@ function drawAnatomicalOverlayLines() {
         else if (item.type.includes("muscle") || labelLower.includes("plantae")) trackColor = 0xffcc00;
 
         item.coordinates.forEach(coord => {
-            // CRITICAL FIX: The lines are now drawn in raw unscaled world space to review coordinates exactly as formatted
-            points.push(new THREE.Vector3(...coord));
+            // Fix absolute unscaled world nodes by converting them via the model's true location matrix
+            const rawV = new THREE.Vector3(...coord);
+            rawV.applyMatrix4(currentLoadedMesh.matrixWorld);
+            points.push(rawV);
         });
 
         const lineGeom = new THREE.BufferGeometry().setFromPoints(points);
@@ -545,18 +547,18 @@ function performLayeredRaycast() {
             pathologies: ["Articular Surface Compression", "Friction Bruising"]
         });
 
-        // FIXED PROXIMITY SCALING METRICS (Evaluated directly in absolute unscaled world units)
         const maxLateralTolerance = 0.015; 
         const maxDepthLimit = 0.025;       
 
-        if (jsonDatabase && jsonDatabase.anatomical_database) {
+        if (jsonDatabase && jsonDatabase.anatomical_database && currentLoadedMesh) {
             jsonDatabase.anatomical_database.forEach(item => {
                 let minDistanceToRayLine = Infinity;
                 let calculatedDepthFromSurface = 0;
 
                 for (let i = 0; i < item.coordinates.length - 1; i++) {
-                    const nodeA = new THREE.Vector3(...item.coordinates[i]);
-                    const nodeB = new THREE.Vector3(...item.coordinates[i+1]);
+                    // Extract localized JSON nodes transformed directly through world transforms
+                    const nodeA = new THREE.Vector3(...item.coordinates[i]).applyMatrix4(currentLoadedMesh.matrixWorld);
+                    const nodeB = new THREE.Vector3(...item.coordinates[i+1]).applyMatrix4(currentLoadedMesh.matrixWorld);
                     
                     const subdivisions = 10;
                     for (let s = 0; s <= subdivisions; s++) {
@@ -651,10 +653,27 @@ function loadFoot() {
         currentLoadedMesh = gltf.scene; 
         currentLoadedMesh.traverse(c => { if(c.isMesh) { c.material = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.4, metalness: 0.2 }); } });
         
-        // CRITICAL FIX: The 3D line engine now stays perfectly in 1:1 scale alignment with world bounds, matching the tracking coordinates without double matrices transformations
+        const box = new THREE.Box3().setFromObject(currentLoadedMesh); 
+        const size = new THREE.Vector3(); 
+        box.getSize(size); 
+        const center = new THREE.Vector3(); 
+        box.getCenter(center);
+        
+        const meshOffset = new THREE.Vector3(-center.x, -box.min.y, -center.z);
+        const maxDim = Math.max(size.x, size.y, size.z); 
+        const meshScale = 1.0 / maxDim;
+
+        currentLoadedMesh.position.copy(meshOffset);
+        currentLoadedMesh.scale.setScalar(meshScale);
+        currentLoadedMesh.position.multiplyScalar(meshScale);
+
         footGroup.add(currentLoadedMesh); 
-        camera.position.set(0, 0.4, 1.2); 
-        controls.target.set(0, 0.1, 0); 
+        
+        // Force world matrix transformations to resolve immediately before initializing lines
+        currentLoadedMesh.updateMatrixWorld(true);
+        
+        camera.position.set(0, 1.2, 2.5); 
+        controls.target.set(0, 0.4, 0); 
         isLoaded = true;
         
         drawAnatomicalOverlayLines();
