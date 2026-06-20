@@ -114,7 +114,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 const PRESET_REGIONS = [
-  // --- LEFT FOOT ---
+   // --- LEFT FOOT ---
   { name: "Left foot - Dorsal Hallux Toenail", pos: [-0.11115, 0.098, 0.465], rot: [0, 0.01, 0], scale: [0.05, 0.015, 0.05] },
   { name: "Left foot - Dorsal Hallux Interphalangeal joint", pos: [-0.11861, 0.12358, 0.38303], rot: [0.27154, 0.11557, 0.02229], scale: [0.08201, 0.02999, 0.02419] },
   { name: "Left foot - Lateral Hallux Interphalangeal joint", pos: [-0.08142, 0.06081, 0.37553], rot: [0.06665, 0.19010, 0.00526], scale: [0.01348, 0.07351, 0.02105] },
@@ -340,7 +340,6 @@ const PRESET_REGIONS = [
   { name: "Right foot - Plantar Central Band Fascia", pos: [0.00000, 0.03738, -0.22424], rot: [0.03827, -0.00121, 0.00191], scale: [0.10000, 0.10000, 0.10000] },
   { name: "Right foot - Posterior Leg", pos: [0.02028, 0.50000, -0.42240], rot: [0.00000, 0.00000, 0.00000], scale: [0.25430, 0.43112, 0.12119] }
 ];
-
 PRESET_REGIONS.push(...PRESET_REGIONS.filter(r => r.name.startsWith("Left")).map(r => ({
     name: r.name.replace("Left", "Right"),
     pos: [r.pos[0] * -1, r.pos[1], r.pos[2]],
@@ -356,7 +355,7 @@ const urls = {
 let scene, camera, renderer, controls;
 let raycaster = new THREE.Raycaster();
 let mouse = new THREE.Vector2();
-let currentFoot = "left"; // Default to left side
+let currentFoot = "left"; // Default to left foot
 let footGroup = new THREE.Group();
 let markerGroup = new THREE.Group();
 let regionGroup = new THREE.Group(); 
@@ -390,8 +389,6 @@ async function init() {
 
     scene.add(footGroup);
     scene.add(markerGroup);
-    
-    // Decouple soft tissues from dynamic mesh containers
     scene.add(lineVisualizationGroup); 
     regionGroup.visible = false; 
     scene.add(regionGroup);
@@ -472,7 +469,7 @@ function getDistanceToSegment(probePoint, nodeA, nodeB) {
 
 function drawAnatomicalOverlayLines() {
     lineVisualizationGroup.clear();
-    if (!jsonDatabase || !jsonDatabase.anatomical_database || !currentLoadedMesh) return;
+    if (!jsonDatabase || !jsonDatabase.anatomical_database) return;
 
     jsonDatabase.anatomical_database.forEach(item => {
         const points = [];
@@ -483,10 +480,8 @@ function drawAnatomicalOverlayLines() {
         else if (item.type.includes("muscle") || labelLower.includes("plantae")) trackColor = 0xffcc00;
 
         item.coordinates.forEach(coord => {
-            // Fix absolute unscaled world nodes by converting them via the model's true location matrix
-            const rawV = new THREE.Vector3(...coord);
-            rawV.applyMatrix4(currentLoadedMesh.matrixWorld);
-            points.push(rawV);
+            // Drawn 1:1 using pure original file values without scaling offsets
+            points.push(new THREE.Vector3(...coord));
         });
 
         const lineGeom = new THREE.BufferGeometry().setFromPoints(points);
@@ -529,7 +524,7 @@ function performLayeredRaycast() {
         });
 
         markerGroup.clear(); 
-        const dot = new THREE.Mesh(new THREE.SphereGeometry(0.007), new THREE.MeshBasicMaterial({ color: 0xff4400 }));
+        const dot = new THREE.Mesh(new THREE.SphereGeometry(0.002), new THREE.MeshBasicMaterial({ color: 0xff4400 }));
         dot.position.copy(hitPoint);
         markerGroup.add(dot);
         
@@ -547,18 +542,18 @@ function performLayeredRaycast() {
             pathologies: ["Articular Surface Compression", "Friction Bruising"]
         });
 
+        // Strict 1:1 unscaled tolerance limits
         const maxLateralTolerance = 0.015; 
         const maxDepthLimit = 0.025;       
 
-        if (jsonDatabase && jsonDatabase.anatomical_database && currentLoadedMesh) {
+        if (jsonDatabase && jsonDatabase.anatomical_database) {
             jsonDatabase.anatomical_database.forEach(item => {
                 let minDistanceToRayLine = Infinity;
                 let calculatedDepthFromSurface = 0;
 
                 for (let i = 0; i < item.coordinates.length - 1; i++) {
-                    // Extract localized JSON nodes transformed directly through world transforms
-                    const nodeA = new THREE.Vector3(...item.coordinates[i]).applyMatrix4(currentLoadedMesh.matrixWorld);
-                    const nodeB = new THREE.Vector3(...item.coordinates[i+1]).applyMatrix4(currentLoadedMesh.matrixWorld);
+                    const nodeA = new THREE.Vector3(...item.coordinates[i]);
+                    const nodeB = new THREE.Vector3(...item.coordinates[i+1]);
                     
                     const subdivisions = 10;
                     for (let s = 0; s <= subdivisions; s++) {
@@ -653,27 +648,12 @@ function loadFoot() {
         currentLoadedMesh = gltf.scene; 
         currentLoadedMesh.traverse(c => { if(c.isMesh) { c.material = new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.4, metalness: 0.2 }); } });
         
-        const box = new THREE.Box3().setFromObject(currentLoadedMesh); 
-        const size = new THREE.Vector3(); 
-        box.getSize(size); 
-        const center = new THREE.Vector3(); 
-        box.getCenter(center);
-        
-        const meshOffset = new THREE.Vector3(-center.x, -box.min.y, -center.z);
-        const maxDim = Math.max(size.x, size.y, size.z); 
-        const meshScale = 1.0 / maxDim;
-
-        currentLoadedMesh.position.copy(meshOffset);
-        currentLoadedMesh.scale.setScalar(meshScale);
-        currentLoadedMesh.position.multiplyScalar(meshScale);
-
+        // CRITICAL FIX: The mesh stays 1:1 exactly at its default center origins
         footGroup.add(currentLoadedMesh); 
         
-        // Force world matrix transformations to resolve immediately before initializing lines
-        currentLoadedMesh.updateMatrixWorld(true);
-        
-        camera.position.set(0, 1.2, 2.5); 
-        controls.target.set(0, 0.4, 0); 
+        // Reposition camera and focus point to frame the unscaled 1:1 coordinates natively
+        camera.position.set(-0.1, 0.5, 0.8); 
+        controls.target.set(-0.1, 0.2, 0); 
         isLoaded = true;
         
         drawAnatomicalOverlayLines();
